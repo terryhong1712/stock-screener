@@ -31,7 +31,8 @@ with st.expander("四項通報條件說明"):
 - **條件四**：個股日K最低價觸及/跌破日60MA季線（前一日仍在均線上方）
 
 個股符合條件時，會額外顯示產業分類、簡介、近3年EPS與當年度預估EPS
-（資料來源：Yahoo Finance，台股資料覆蓋率有限，查無資料會標示「資料不足」）
+（產業分類優先採用台灣證交所官方資料，簡介優先採用中文維基百科，
+查無資料會標示「資料不足」）
 """)
 
 if st.button("🔍 推薦股票", type="primary", use_container_width=True):
@@ -80,7 +81,10 @@ if st.button("🔍 推薦股票", type="primary", use_container_width=True):
                     profile = get_stock_profile(r['code'])
                 with st.container(border=True):
                     st.markdown(f"**產業分類：** {profile['industry']}")
-                    st.markdown(f"**企業簡介：** {profile['summary']}")
+                    summary_line = f"**企業簡介：** {profile['summary']}"
+                    if profile.get("summary_source"):
+                        summary_line += f"　_{profile['summary_source']}_"
+                    st.markdown(summary_line)
 
                     if profile["eps_history"]:
                         eps_text = "、".join(
