@@ -114,7 +114,10 @@ def resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
         "Close": "last",
         "Volume": "sum",
     }).dropna(subset=["Close"])
+    weekly["MA5"] = weekly["Close"].rolling(window=5, min_periods=5).mean()
+    weekly["MA10"] = weekly["Close"].rolling(window=10, min_periods=10).mean()
     weekly["MA20"] = weekly["Close"].rolling(window=WEEKLY_MA, min_periods=WEEKLY_MA).mean()
+    weekly["MA60"] = weekly["Close"].rolling(window=60, min_periods=60).mean()
     return weekly
 
 
@@ -152,10 +155,10 @@ def check_condition2(stock_list, progress_callback=None):
         if progress_callback:
             progress_callback(i + 1, total, code, name)
         df = fetch_daily(code)
-        if df.empty or len(df) < (WEEKLY_MA + 2) * 5:
+        if df.empty or len(df) < (60 + 2) * 5:
             continue
         weekly = resample_weekly(df)
-        weekly = weekly.dropna(subset=["MA20"])
+        weekly = weekly.dropna(subset=["MA5", "MA10", "MA20", "MA60"])
         if len(weekly) < 3:
             continue
 
@@ -164,6 +167,16 @@ def check_condition2(stock_list, progress_callback=None):
 
         crossed_up = (prev["Close"] < prev["MA20"]) and (latest["Close"] >= latest["MA20"])
         if not crossed_up:
+            continue
+
+        # 新增條件：週K棒（收盤價）須位於所有均線（MA5/10/20/60）之上
+        above_all_ma = (
+            latest["Close"] >= latest["MA5"]
+            and latest["Close"] >= latest["MA10"]
+            and latest["Close"] >= latest["MA20"]
+            and latest["Close"] >= latest["MA60"]
+        )
+        if not above_all_ma:
             continue
 
         if VOLUME_COMPARE_MODE == "prev_week":
@@ -179,7 +192,7 @@ def check_condition2(stock_list, progress_callback=None):
         if volume_change_pct > 0:
             results.append({
                 "code": code, "name": name,
-                "desc": (f"週收盤價站上週20MA，本週量較"
+                "desc": (f"週收盤價站上週20MA，且位於MA5/10/20/60所有均線之上，本週量較"
                          f"{'前週' if VOLUME_COMPARE_MODE == 'prev_week' else '近期均量'}"
                          f"增加{volume_change_pct:.0f}%")
             })
@@ -252,3 +265,74 @@ def format_section(title, results):
         for r in results:
             lines.append(f"• {r['code']} {r['name']} — {r['desc']}")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# 企業補充資訊：產業分類、簡介、EPS歷史與預估
+# --------------------------------------------------------------------------
+
+def get_stock_profile(code: str) -> dict:
+    """
+    取得個股補充資訊：產業分類、簡介、近3年EPS、當年度預估EPS。
+    資料來源為 yfinance（Yahoo Finance），台股資料覆蓋率不完整，
+    任何欄位查無資料時會標示「資料不足」，不會捏造內容。
+    """
+    ticker_str = to_yf_ticker(code)
+    profile = {
+        "industry": "資料不足",
+        "summary": "資料不足",
+        "eps_history": [],   # [{"year": "2023", "eps": 12.3}, ...] 由舊到新排序
+        "eps_forecast": None,  # 當年度／未來12個月 EPS 預估值，float 或 None
+        "eps_forecast_note": "",
+    }
+
+    try:
+        ticker = yf.Ticker(ticker_str)
+        info = {}
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+
+        # 產業分類：優先用 industry，其次 sector
+        industry = info.get("industry") or info.get("sector")
+        if industry:
+            profile["industry"] = industry
+
+        # 企業簡介：優先用 longBusinessSummary，截斷至50字
+        summary = info.get("longBusinessSummary")
+        if summary:
+            summary = summary.strip()
+            profile["summary"] = (summary[:50] + "…") if len(summary) > 50 else summary
+
+        # 當年度／未來12個月 EPS 預估（分析師共識）
+        forward_eps = info.get("forwardEps")
+        if forward_eps is not None:
+            profile["eps_forecast"] = round(float(forward_eps), 2)
+            profile["eps_forecast_note"] = "分析師預估未來12個月EPS（非嚴格對應單一會計年度）"
+
+        # 近3年EPS：從年度財報的 Diluted EPS / Basic EPS 取得
+        try:
+            income_stmt = ticker.income_stmt
+            if income_stmt is not None and not income_stmt.empty:
+                eps_row = None
+                for row_name in ["Diluted EPS", "Basic EPS"]:
+                    if row_name in income_stmt.index:
+                        eps_row = income_stmt.loc[row_name]
+                        break
+                if eps_row is not None:
+                    eps_row = eps_row.dropna().sort_index()
+                    recent = eps_row.tail(3)
+                    for date_idx, val in recent.items():
+                        year_label = str(date_idx.year) if hasattr(date_idx, "year") else str(date_idx)
+                        profile["eps_history"].append({
+                            "year": year_label,
+                            "eps": round(float(val), 2)
+                        })
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+    return profile
